@@ -1,0 +1,181 @@
+from dataclasses import dataclass
+
+import torch
+from torch import nn, Tensor
+from torch.nn import functional as F
+
+
+@dataclass
+class QuantizerOutput:
+    quantized_vectors: Tensor   # shape (..., D)
+    quantized_indices: Tensor   # shape (...)
+    loss: Tensor
+
+
+class Quantizer(nn.Module):
+    """
+    Shape-agnostic vector quantizer: accepts any z of shape (..., D) and returns
+    the same shape. For flat pose latents this is (N, D); it also handles
+    (N, L, D) or (N, T, D) unchanged if you later go per-landmark or per-frame.
+
+    van den Oord, Vinyals & Kavukcuoglu, 2017, "Neural Discrete Representation Learning"
+    """
+
+    def __init__(
+        self,
+        n_embeddings: int,
+        embedding_dim: int,
+        commitment_loss_factor: float,
+        quantization_loss_factor: float,
+    ):
+        super().__init__()
+        self.n_embeddings = n_embeddings
+        self.embedding_dim = embedding_dim
+        self.commitment_loss_factor = commitment_loss_factor
+        self.quantization_loss_factor = quantization_loss_factor
+
+        self.embeddings = nn.Embedding(self.n_embeddings, self.embedding_dim)
+        # NOTE: the standard uniform(-1/K, 1/K) init gets very tight for large K
+        # (K=1000 -> +-0.001) while a LayerNorm'd encoder output has norm ~sqrt(D).
+        # If codebook usage collapses early, try init from encoder-output
+        # statistics or use QuantizerEMA below.
+        self.embeddings.weight.data.uniform_(
+            -1 / self.n_embeddings, 1 / self.n_embeddings
+        )
+
+    def forward(self, z: Tensor) -> QuantizerOutput:
+        input_shape = z.shape
+        z_flat = z.reshape(-1, self.embedding_dim)
+
+        # --- Find nearest neighbors ---
+        distances = (
+            torch.sum(z_flat**2, dim=1, keepdim=True)
+            + torch.sum(self.embeddings.weight**2, dim=1)
+            - 2 * torch.matmul(z_flat, self.embeddings.weight.t())
+        )
+
+        encoding_indices = torch.argmin(distances, dim=1)
+        quantized = self.embeddings(encoding_indices).reshape(input_shape)
+
+        # --- Losses ---
+        # Codebook loss: pulls the embeddings toward the encoder output.
+        embedding_loss = F.mse_loss(quantized, z.detach())
+        # Commitment loss: pulls the encoder output toward the chosen embedding.
+        commitment_loss = F.mse_loss(z, quantized.detach())
+
+        loss = (
+            self.quantization_loss_factor * embedding_loss
+            + self.commitment_loss_factor * commitment_loss
+        )
+
+        # --- Straight-Through Estimator ---
+        # Bengio, Leonard & Courville, 2013, "Estimating or Propagating Gradients
+        # Through Stochastic Neurons for Conditional Computation"
+        quantized = z + (quantized - z).detach()
+
+        return QuantizerOutput(
+            quantized_vectors=quantized,
+            quantized_indices=encoding_indices.reshape(input_shape[:-1]),
+            loss=loss,
+        )
+
+
+class QuantizerEMA(nn.Module):
+    """
+    EMA-updated codebook variant. The codebook is not trained by gradient descent;
+    only the commitment loss reaches the encoder.
+    """
+
+    def __init__(
+        self,
+        n_embeddings: int,
+        embedding_dim: int,
+        commitment_loss_factor: float,
+        decay: float = 0.99,
+        eps: float = 1e-5,
+    ):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.n_embeddings = n_embeddings
+        self.decay = decay
+        self.eps = eps
+        self.commitment_loss_factor = commitment_loss_factor
+
+        embeddings = torch.randn(n_embeddings, embedding_dim)
+        self.register_buffer("embeddings", embeddings)
+        self.register_buffer("cluster_size", torch.zeros(n_embeddings))
+        self.register_buffer("ema_embed", embeddings.clone())
+
+    def forward(self, z: Tensor) -> QuantizerOutput:
+        input_shape = z.shape
+        z_flat = z.reshape(-1, self.embedding_dim)
+
+        distances = (
+            torch.sum(z_flat**2, dim=1, keepdim=True)
+            + torch.sum(self.embeddings**2, dim=1)
+            - 2 * torch.matmul(z_flat, self.embeddings.t())
+        )
+
+        encoding_indices = torch.argmin(distances, dim=1)
+        quantized = F.embedding(encoding_indices, self.embeddings).reshape(input_shape)
+
+        if self.training:
+            with torch.no_grad():
+                one_hot_encoding = F.one_hot(
+                    encoding_indices, self.n_embeddings
+                ).type(z_flat.dtype)
+
+                # Running counts and running sums of assigned vectors.
+                n_i = torch.sum(one_hot_encoding, dim=0)
+                dw = one_hot_encoding.t() @ z_flat.detach()
+
+                self.cluster_size.mul_(self.decay).add_(n_i, alpha=1 - self.decay)
+                self.ema_embed.mul_(self.decay).add_(dw, alpha=1 - self.decay)
+
+                # Laplace smoothing applied ONLY for the normalization below --
+                # it must not be written back into the running cluster_size state.
+                n = torch.sum(self.cluster_size)
+                smoothed_cluster_size = (
+                    (self.cluster_size + self.eps)
+                    / (n + self.n_embeddings * self.eps)
+                    * n
+                )
+
+                self.embeddings.copy_(
+                    self.ema_embed / smoothed_cluster_size.unsqueeze(-1)
+                )
+
+        # Only the commitment loss, since the codebook is updated by EMA.
+        loss = self.commitment_loss_factor * F.mse_loss(z, quantized.detach())
+
+        # --- Straight-Through Estimator ---
+        quantized = z + (quantized - z).detach()
+
+        return QuantizerOutput(
+            quantized_vectors=quantized,
+            quantized_indices=encoding_indices.reshape(input_shape[:-1]),
+            loss=loss,
+        )
+
+
+if __name__ == "__main__":
+    N, D, K = 16, 512, 1000
+
+    z = torch.randn(N, D, requires_grad=True)
+
+    q = Quantizer(
+        n_embeddings=K,
+        embedding_dim=D,
+        commitment_loss_factor=0.25,
+        quantization_loss_factor=1.0,
+    )
+    out = q(z)
+    print(out.quantized_vectors.shape, out.quantized_indices.shape)
+
+    q_ema = QuantizerEMA(
+        n_embeddings=K,
+        embedding_dim=D,
+        commitment_loss_factor=0.25,
+    )
+    out_ema = q_ema(z)
+    print(out_ema.quantized_vectors.shape, out_ema.quantized_indices.shape)
