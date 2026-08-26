@@ -5,7 +5,7 @@ Graph-convolutional pose embedding, corresponding to Sec. 3.2 "Pose Embedding
 Layer" of the BEST paper (Zhao et al., AAAI 2023).
 
 The paper extracts, per frame, a *pose triplet unit*: an upper-body pose
-(7 joints), a left-hand pose (21 joints) and a right-hand pose (21 joints),
+(23 joints), a left-hand pose (21 joints) and a right-hand pose (21 joints),
 each in 2D (x, y). It embeds each part with the ST-GCN-style graph
 convolution of Cai et al. (2019), and concatenates the three part embeddings
 into one D-dim vector (D_part = D/3 each).
@@ -21,25 +21,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-# ---------------------------------------------------------------------------
-# Skeleton topologies (MMPose-style keypoint layout referenced in the paper:
-# 7 upper-body joints + 21 joints per hand = 49 joints total per frame).
-# Edit these edge lists if you swap in your own keypoint detector's layout.
-# ---------------------------------------------------------------------------
-
-# 7 upper-body joints: nose, neck, l-shoulder, r-shoulder, l-elbow, r-elbow, mid-hip
-BODY_EDGES = [(0, 1), (1, 2), (1, 3), (2, 4), (3, 5), (1, 6)]
-NUM_BODY_JOINTS = 7
-
-# 21-joint hand skeleton (MediaPipe/OpenPose hand convention): wrist + 4 joints x 5 fingers
-HAND_EDGES = [
-    (0, 1), (1, 2), (2, 3), (3, 4),          # thumb
-    (0, 5), (5, 6), (6, 7), (7, 8),          # index
-    (0, 9), (9, 10), (10, 11), (11, 12),     # middle
-    (0, 13), (13, 14), (14, 15), (15, 16),   # ring
-    (0, 17), (17, 18), (18, 19), (19, 20),   # pinky
-]
+from sign_language_tools.pose.mediapipe.edges import UPPER_POSE_EDGES, HAND_EDGES
+NUM_BODY_JOINTS = 23
 NUM_HAND_JOINTS = 21
 
 
@@ -104,7 +87,7 @@ class PoseEmbeddingLayer(nn.Module):
         super().__init__()
         assert D % 3 == 0, "D must be divisible by 3 (body, left hand, right hand)"
         self.d_part = D // 3
-        self.body_gcn = PartGCN(NUM_BODY_JOINTS, BODY_EDGES, out_dim=self.d_part,
+        self.body_gcn = PartGCN(NUM_BODY_JOINTS, UPPER_POSE_EDGES, out_dim=self.d_part,
                                  hidden_dim=hidden_dim, num_layers=gcn_layers)
         self.lhand_gcn = PartGCN(NUM_HAND_JOINTS, HAND_EDGES, out_dim=self.d_part,
                                   hidden_dim=hidden_dim, num_layers=gcn_layers)
@@ -113,7 +96,7 @@ class PoseEmbeddingLayer(nn.Module):
 
     def forward(self, body, left_hand, right_hand):
         """
-        body:       (B, T, 7, 2)
+        body:       (B, T, 23, 2)
         left_hand:  (B, T, 21, 2)
         right_hand: (B, T, 21, 2)
         returns:

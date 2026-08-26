@@ -11,7 +11,7 @@ smoke test on tiny dimensions).
 
 | File | Paper section | What it implements |
 |---|---|---|
-| `gcn.py` | Sec 3.2, "Pose Embedding Layer" | GCN over 7 body / 21+21 hand joints → `D_part`-dim embedding per part per frame |
+| `gcn.py` | Sec 3.2, "Pose Embedding Layer" | GCN over 23 body / 21+21 hand joints → `D_part`-dim embedding per part per frame |
 | `tokenizer.py` | Sec 3.1, Eq. (1)–(3) | d-VAE: encoder → coupled hand/body vector quantizers → decoder; `dvae_loss` implements Eq. (3) |
 | `mum.py` | Sec 3.3 | MUM masking: pick `α·T` frames, mask hand/body independently per frame w.p. 0.5 each |
 | `best_model.py` | Sec 3.2 (Transformer), Eq. (5)–(6), Sec 3.4 | Shared `BESTBackbone` (pose embed → mask → +pos-enc → `nn.TransformerEncoder`); `BESTPretrainModel` adds the two softmax heads (`W1` shared across hands, `W2` for body) and `mum_loss` implements Eq. (6); `BESTClassifier` swaps the decoder for an MLP head for fine-tuning |
@@ -41,7 +41,7 @@ Stage 3 (finetune):
 
 - **GCN topology**: the paper cites Cai et al. (2019)'s GCN but doesn't give
   exact adjacency/architecture. `gcn.py` uses a standard 2-hop normalized
-  adjacency spatial GCN with a plausible 49-joint (7 body + 21+21 hand)
+  adjacency spatial GCN with a plausible 65-joint (23 body + 21+21 hand)
   MMPose-style skeleton — swap `BODY_EDGES`/`HAND_EDGES` for your detector's
   actual joint layout.
 - **Number of Transformer layers `N`**: not stated in the paper (only heads=8,

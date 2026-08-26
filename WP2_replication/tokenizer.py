@@ -42,7 +42,7 @@ class TripletDecoder(nn.Module):
 
     def __init__(self, d_part: int = 512, hidden_dim: int = 256,
                  num_left_joints: int = 21, num_right_joints: int = 21,
-                 num_body_joints: int = 7):
+                 num_body_joints: int = 23):
         super().__init__()
 
         def mlp(out_joints):

@@ -9,9 +9,9 @@ End-to-end driver for the three stages described in the paper:
 
 A `DummySignDataset` stands in for a real dataset (e.g. WLASL/MSASL/NMFs-CSL/
 SLR500 pose sequences extracted with MMPose, per Sec. 4.2 "Data Preparation").
-Swap it for a Dataset that reads your own extracted 49-joint 2D poses,
+Swap it for a Dataset that reads your own extracted 65-joint 2D poses,
 following the same __getitem__ contract:
-    body:  (T, 7, 2) float
+    body:  (T, 23, 2) float
     left:  (T, 21, 2) float
     right: (T, 21, 2) float
     label: int (only needed for fine-tuning)
@@ -20,9 +20,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
+from pathlib import Path
+
 from tokenizer import CouplingTokenizer, dvae_loss
 from best_model import BESTBackbone, BESTPretrainModel, BESTClassifier, mum_loss
 
+from sldl import SignLanguageDataset
+from sldl.targets.frame_labels import FrameLabelsTarget
+from sldl.targets.segments import SegmentTarget
 
 # ---------------------------------------------------------------------------
 # Config (Sec. 4.2 "Model Hyper-Parameters" / "Training Setup")
@@ -34,11 +39,30 @@ class Cfg:
     FFN_DIM = 2048
     NUM_HAND_CODES = 1000     # |V_hand|  (M1)
     NUM_BODY_CODES = 500      # |V_body|  (M2)
-    T = 32                    # frames per clip (Sec 4.2: 32 frames sampled)
+    T = 2048                  # frames per clip (Sec 4.2: 32 frames sampled)
     ALPHA = 0.4               # MUM mask ratio (not stated exactly; paper ablates it -- tune this)
     BATCH_SIZE = 8
     NUM_CLASSES = 100         # e.g. MSASL100
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    ROOT = Path(__file__).resolve().parent / "data"
+    SHARDS_URL = (ROOT / "shards" / "annotated" / "shard_000000.tar").as_uri()
+
+DATASET = SignLanguageDataset(
+    shards_url=Cfg.SHARDS_URL,
+    use_windows=True,
+    window_size=Cfg.T,
+    window_stride=Cfg.T,
+    max_empty_windows=0,
+    targets={
+        'per-frame-labels': FrameLabelsTarget(),
+        'segments': SegmentTarget(),
+    },
+    precompute_targets=True,
+    load_videos=False,
+    video_path=str(Cfg.ROOT / "videos.tar"),
+    video_index_path=str(Cfg.ROOT / "videos.tar.index.json"),
+    show_loading_progress=True,
+)
 
 
 class DummySignDataset(Dataset):
@@ -53,18 +77,53 @@ class DummySignDataset(Dataset):
         return self.n
 
     def __getitem__(self, idx):
-        body = torch.randn(self.T, 7, 2)
+        body = torch.randn(self.T, 23, 2)
         left = torch.randn(self.T, 21, 2)
         right = torch.randn(self.T, 21, 2)
         label = torch.randint(0, self.num_classes, (1,)).item()
         return body, left, right, label
 
+class SignDataSetWrapper(Dataset):
+    @staticmethod
+    def prune_small_samples(dataset, expected_length):
+        banned_idx = []
+        for idx in range(len(dataset)):
+            if dataset[idx]["poses"]["upper_pose"].shape[0] != expected_length:
+                banned_idx.append(idx)
+        return [sample for idx, sample in enumerate(dataset) if idx not in banned_idx]
+
+    def __init__(self, dataset:SignLanguageDataset, expected_length:int = -1, remove_z=True):
+        self.dataset = dataset if expected_length == -1 else self.prune_small_samples(dataset, expected_length)
+        self.remove_z=remove_z
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        body = self.dataset[idx]["poses"]["upper_pose"]
+        left = self.dataset[idx]["poses"]["left_hand"]
+        right = self.dataset[idx]["poses"]["right_hand"]
+        label = 0 #TODO
+        if self.remove_z:
+            return (
+                torch.as_tensor(body[...,:-1], dtype=torch.float32),
+                torch.as_tensor(left[...,:-1], dtype=torch.float32),
+                torch.as_tensor(right[...,:-1], dtype=torch.float32),
+                label,
+            )
+        else:
+            return (
+                torch.as_tensor(body, dtype=torch.float32),
+                torch.as_tensor(left, dtype=torch.float32),
+                torch.as_tensor(right, dtype=torch.float32),
+                label,
+            )
 
 # ---------------------------------------------------------------------------
 # Stage 1: train the coupling tokenizer (frame-level, no temporal modeling)
 # ---------------------------------------------------------------------------
 def train_tokenizer(epochs=5, lr=1e-3, decay_every=10, decay_factor=0.1):
-    dataset = DummySignDataset()
+    dataset = SignDataSetWrapper(DATASET, Cfg.T)
     loader = DataLoader(dataset, batch_size=Cfg.BATCH_SIZE, shuffle=True)
 
     tokenizer = CouplingTokenizer(
@@ -116,7 +175,7 @@ def get_pseudo_labels(tokenizer: CouplingTokenizer, body, left, right):
 
 def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6,
              weight_decay=0.01):
-    dataset = DummySignDataset()
+    dataset = SignDataSetWrapper(DATASET, Cfg.T)
     loader = DataLoader(dataset, batch_size=Cfg.BATCH_SIZE, shuffle=True)
 
     tokenizer = tokenizer.to(Cfg.DEVICE)
@@ -166,7 +225,7 @@ def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6,
 # Stage 3: downstream fine-tuning (Sec. 3.4)
 # ---------------------------------------------------------------------------
 def finetune(backbone: BESTBackbone, epochs=10, lr=1e-4, decay_every=10, decay_factor=0.1):
-    dataset = DummySignDataset(num_classes=Cfg.NUM_CLASSES)
+    dataset = SignDataSetWrapper(DATASET, Cfg.T)
     loader = DataLoader(dataset, batch_size=Cfg.BATCH_SIZE, shuffle=True)
 
     model = BESTClassifier(backbone, num_classes=Cfg.NUM_CLASSES).to(Cfg.DEVICE)
@@ -200,6 +259,7 @@ def finetune(backbone: BESTBackbone, epochs=10, lr=1e-4, decay_every=10, decay_f
 
 
 if __name__ == "__main__":
+    print(f"Working with {Cfg.DEVICE}...")
     # Stage 1
     tokenizer = train_tokenizer(epochs=2)          # use ~epochs=100s+ / real data in practice
     # Stage 2
