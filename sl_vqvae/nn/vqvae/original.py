@@ -4,8 +4,8 @@ import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
 
-from sl_vqvae.nn.vqvae.quantizer import Quantizer, QuantizerEMA
-from sl_vqvae.nn.vqvae.blocks import Encoder, Decoder
+from sl_vqvae.nn.quantizers.quantizer import Quantizer, QuantizerEMA
+from sl_vqvae.nn.quantizers.blocks import Encoder, Decoder
 
 
 @dataclass
