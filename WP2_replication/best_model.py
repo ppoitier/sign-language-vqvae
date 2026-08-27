@@ -38,14 +38,14 @@ class BESTBackbone(nn.Module):
     """
 
     def __init__(self, D: int = 1536, n_heads: int = 8, n_layers: int = 4,
-                 ffn_dim: int = 2048, dropout: float = 0.1):
+                 ffn_dim: int = 2048, dropout: float = 0.1, max_pe_len:int = 512):
         super().__init__()
         assert D % 3 == 0
         self.D = D
         self.d_part = D // 3
 
         self.pose_embed = PoseEmbeddingLayer(D=D)
-        self.pos_enc = SinusoidalPositionalEncoding(D)
+        self.pos_enc = SinusoidalPositionalEncoding(D, max_len=max_pe_len)
         self.mask_token = nn.Parameter(torch.zeros(self.d_part))
         nn.init.normal_(self.mask_token, std=0.02)
 
@@ -89,9 +89,9 @@ class BESTPretrainModel(nn.Module):
     """
 
     def __init__(self, D: int = 1536, num_hand_codes: int = 1000,
-                 num_body_codes: int = 500, n_heads: int = 8, n_layers: int = 4):
+                 num_body_codes: int = 500, n_heads: int = 8, n_layers: int = 4, max_pe_len:int = 512):
         super().__init__()
-        self.backbone = BESTBackbone(D=D, n_heads=n_heads, n_layers=n_layers)
+        self.backbone = BESTBackbone(D=D, n_heads=n_heads, n_layers=n_layers, max_pe_len=max_pe_len)
         d_part = D // 3
         self.hand_head = nn.Linear(d_part, num_hand_codes)   # W1, b1
         self.body_head = nn.Linear(d_part, num_body_codes)   # W2, b2

@@ -25,9 +25,9 @@ from pathlib import Path
 from tokenizer import CouplingTokenizer, dvae_loss
 from best_model import BESTBackbone, BESTPretrainModel, BESTClassifier, mum_loss
 
-from sldl import SignLanguageDataset
-from sldl.targets.frame_labels import FrameLabelsTarget
-from sldl.targets.segments import SegmentTarget
+from sldl import SignLanguageDataset, SignLanguageCollator
+from sign_language_tools.pose.transforms import DropCoordinates
+from sign_language_tools.common.transforms import ApplyToAll 
 
 # ---------------------------------------------------------------------------
 # Config (Sec. 4.2 "Model Hyper-Parameters" / "Training Setup")
@@ -38,93 +38,54 @@ class Cfg:
     N_LAYERS = 4              # not stated explicitly in the paper; pick to fit your budget
     FFN_DIM = 2048
     NUM_HAND_CODES = 1000     # |V_hand|  (M1)
-    NUM_BODY_CODES = 500      # |V_body|  (M2)
-    T = 2048                  # frames per clip (Sec 4.2: 32 frames sampled)
+    NUM_BODY_CODES = 1000      # |V_body|  (M2)
+    T = 256                   # frames per clip (Sec 4.2: 32 frames sampled)
     ALPHA = 0.4               # MUM mask ratio (not stated exactly; paper ablates it -- tune this)
-    BATCH_SIZE = 8
+    BATCH_SIZE = 16
     NUM_CLASSES = 100         # e.g. MSASL100
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     ROOT = Path(__file__).resolve().parent / "data"
-    SHARDS_URL = (ROOT / "shards" / "annotated" / "shard_000000.tar").as_uri()
 
-DATASET = SignLanguageDataset(
-    shards_url=Cfg.SHARDS_URL,
+TRAIN_DATASET = SignLanguageDataset(
+    shards_url=(Cfg.ROOT / "shards" / "annotated" / "shard_000000.tar").as_uri(),
     use_windows=True,
     window_size=Cfg.T,
     window_stride=Cfg.T,
     max_empty_windows=0,
-    targets={
-        'per-frame-labels': FrameLabelsTarget(),
-        'segments': SegmentTarget(),
-    },
-    precompute_targets=True,
-    load_videos=False,
-    video_path=str(Cfg.ROOT / "videos.tar"),
-    video_index_path=str(Cfg.ROOT / "videos.tar.index.json"),
+    pose_transform=ApplyToAll(DropCoordinates('z')),
     show_loading_progress=True,
 )
 
+VAL_DATASET = SignLanguageDataset(
+    shards_url=(Cfg.ROOT / "shards" / "annotated" / "shard_000001.tar").as_uri(),
+    use_windows=True,
+    window_size=Cfg.T,
+    window_stride=Cfg.T,
+    max_empty_windows=0,
+    pose_transform=ApplyToAll(DropCoordinates('z')),
+    show_loading_progress=True,
+)
 
-class DummySignDataset(Dataset):
-    """Synthetic stand-in for a pose-extracted sign language dataset."""
-
-    def __init__(self, n_samples=64, T=Cfg.T, num_classes=Cfg.NUM_CLASSES):
-        self.n = n_samples
-        self.T = T
-        self.num_classes = num_classes
-
-    def __len__(self):
-        return self.n
-
-    def __getitem__(self, idx):
-        body = torch.randn(self.T, 23, 2)
-        left = torch.randn(self.T, 21, 2)
-        right = torch.randn(self.T, 21, 2)
-        label = torch.randint(0, self.num_classes, (1,)).item()
-        return body, left, right, label
-
-class SignDataSetWrapper(Dataset):
-    @staticmethod
-    def prune_small_samples(dataset, expected_length):
-        banned_idx = []
-        for idx in range(len(dataset)):
-            if dataset[idx]["poses"]["upper_pose"].shape[0] != expected_length:
-                banned_idx.append(idx)
-        return [sample for idx, sample in enumerate(dataset) if idx not in banned_idx]
-
-    def __init__(self, dataset:SignLanguageDataset, expected_length:int = -1, remove_z=True):
-        self.dataset = dataset if expected_length == -1 else self.prune_small_samples(dataset, expected_length)
-        self.remove_z=remove_z
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        body = self.dataset[idx]["poses"]["upper_pose"]
-        left = self.dataset[idx]["poses"]["left_hand"]
-        right = self.dataset[idx]["poses"]["right_hand"]
-        label = 0 #TODO
-        if self.remove_z:
-            return (
-                torch.as_tensor(body[...,:-1], dtype=torch.float32),
-                torch.as_tensor(left[...,:-1], dtype=torch.float32),
-                torch.as_tensor(right[...,:-1], dtype=torch.float32),
-                label,
-            )
-        else:
-            return (
-                torch.as_tensor(body, dtype=torch.float32),
-                torch.as_tensor(left, dtype=torch.float32),
-                torch.as_tensor(right, dtype=torch.float32),
-                label,
-            )
+@torch.no_grad()
+def codebook_usage(tokenizer, loader, prep_fn):
+    tokenizer.eval()
+    used_hand_left, used_hand_right, used_body = set(), set(), set()
+    for batch in loader:
+        body_f, left_f, right_f = prep_fn(batch)
+        k_l, k_r, k_b = tokenizer.tokenize(body_f, left_f, right_f)
+        used_hand_left.update(k_l.tolist()); used_hand_right.update(k_r.tolist())
+        used_body.update(k_b.tolist())
+    tokenizer.train()
+    return len(used_hand_left), len(used_hand_right), len(used_body)
 
 # ---------------------------------------------------------------------------
 # Stage 1: train the coupling tokenizer (frame-level, no temporal modeling)
 # ---------------------------------------------------------------------------
-def train_tokenizer(epochs=5, lr=1e-3, decay_every=10, decay_factor=0.1):
-    dataset = SignDataSetWrapper(DATASET, Cfg.T)
-    loader = DataLoader(dataset, batch_size=Cfg.BATCH_SIZE, shuffle=True)
+def train_tokenizer(epochs=5, lr=1e-3, decay_every=10, decay_factor=0.1, eval_dataset=None, min_samples=8000, best_ckpt_path="tokenizer_best.pt"):
+    train_loader = DataLoader(TRAIN_DATASET, batch_size=Cfg.BATCH_SIZE, shuffle=True, collate_fn=SignLanguageCollator())
+    eval_loader = None
+    if eval_dataset is not None:
+        eval_loader = DataLoader(eval_dataset, batch_size=Cfg.BATCH_SIZE, shuffle=False, collate_fn=SignLanguageCollator())
 
     tokenizer = CouplingTokenizer(
         d_part=Cfg.D // 3,
@@ -135,15 +96,49 @@ def train_tokenizer(epochs=5, lr=1e-3, decay_every=10, decay_factor=0.1):
     opt = torch.optim.Adam(tokenizer.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.StepLR(opt, step_size=decay_every, gamma=decay_factor)
 
-    tokenizer.train()
-    for epoch in range(epochs):
+    def _prep_batch(batch):
+        body = batch["poses"]["upper_pose"].float()
+        left = batch["poses"]["left_hand"].float()
+        right = batch["poses"]["right_hand"].float()
+        B, T = body.shape[0], body.shape[1]
+        mask = batch["masks"].view(B * T, *batch["masks"].shape[2:])
+        body_f = body.view(B * T, *body.shape[2:])[mask].to(Cfg.DEVICE)
+        left_f = left.view(B * T, *left.shape[2:])[mask].to(Cfg.DEVICE)
+        right_f = right.view(B * T, *right.shape[2:])[mask].to(Cfg.DEVICE)
+        return body_f, left_f, right_f
+
+    @torch.no_grad()
+    def evaluate():
+        tokenizer.eval()
         running = 0.0
-        for body, left, right, _ in loader:
-            # tokenizer operates per-frame: flatten (B, T, K, 2) -> (B*T, K, 2)
-            B, T = body.shape[0], body.shape[1]
-            body_f = body.reshape(B * T, *body.shape[2:]).to(Cfg.DEVICE)
-            left_f = left.reshape(B * T, *left.shape[2:]).to(Cfg.DEVICE)
-            right_f = right.reshape(B * T, *right.shape[2:]).to(Cfg.DEVICE)
+        for batch in eval_loader:
+            body_f, left_f, right_f = _prep_batch(batch)
+            out = tokenizer(body_f, left_f, right_f)
+            loss, _ = dvae_loss(out, left_f, right_f, body_f)
+            running += loss.item()
+        tokenizer.train()
+        return running / len(eval_loader)
+
+    best_eval_loss = float("inf")
+
+    zs_l, zs_r, zs_b = [], [], []
+    n = 0
+    with torch.no_grad():
+        for batch in train_loader:
+            body_f, left_f, right_f = _prep_batch(batch)
+            z_l, z_r, z_b = tokenizer.encoder(body_f, left_f, right_f)
+            zs_l.append(z_l); zs_r.append(z_r); zs_b.append(z_b)
+            n += z_l.shape[0]
+            if n >= min_samples:
+                break
+    tokenizer.init_tokenizer_weights(torch.cat(zs_l), torch.cat(zs_r), torch.cat(zs_b))
+
+    for epoch in range(epochs):
+        print(codebook_usage(tokenizer, train_loader, _prep_batch))
+        tokenizer.train()
+        running = 0.0
+        for batch in train_loader:
+            body_f, left_f, right_f = _prep_batch(batch)
 
             out = tokenizer(body_f, left_f, right_f)
             loss, logs = dvae_loss(out, left_f, right_f, body_f)
@@ -153,10 +148,32 @@ def train_tokenizer(epochs=5, lr=1e-3, decay_every=10, decay_factor=0.1):
             opt.step()
             running += loss.item()
         sched.step()
-        print(f"[tokenizer] epoch {epoch+1}/{epochs}  loss={running/len(loader):.4f}  {logs}")
+        train_loss = running / len(train_loader)
 
-    torch.save(tokenizer.state_dict(), "tokenizer.pt")
+        msg = f"[tokenizer] epoch {epoch+1}/{epochs}  train_loss={train_loss:.4f}  {logs}"
+
+        if eval_loader is not None:
+            eval_loss = evaluate()
+            msg += f"  eval_loss={eval_loss:.4f}"
+            if eval_loss < best_eval_loss:
+                best_eval_loss = eval_loss
+                torch.save(tokenizer.state_dict(), best_ckpt_path)
+                msg += "  (new best, saved)"
+
+        torch.save(tokenizer.state_dict(), f"tokenizer_{epoch}.pt")
+        print(msg)
+
     return tokenizer
+
+def load_tokenizer(path:str):
+    tokenizer = CouplingTokenizer(
+        d_part=Cfg.D // 3,
+        num_hand_codes=Cfg.NUM_HAND_CODES,
+        num_body_codes=Cfg.NUM_BODY_CODES,
+    )
+
+    tokenizer.load_state_dict(torch.load(path, weights_only=True))
+    return tokenizer.to(Cfg.DEVICE)
 
 
 # ---------------------------------------------------------------------------
@@ -173,10 +190,8 @@ def get_pseudo_labels(tokenizer: CouplingTokenizer, body, left, right):
     return k_l.view(B, T), k_r.view(B, T), k_b.view(B, T)
 
 
-def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6,
-             weight_decay=0.01):
-    dataset = SignDataSetWrapper(DATASET, Cfg.T)
-    loader = DataLoader(dataset, batch_size=Cfg.BATCH_SIZE, shuffle=True)
+def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6, weight_decay=0.01):
+    train_loader = DataLoader(TRAIN_DATASET, batch_size=Cfg.BATCH_SIZE, shuffle=True, collate_fn=SignLanguageCollator())
 
     tokenizer = tokenizer.to(Cfg.DEVICE)
     for p in tokenizer.parameters():
@@ -185,12 +200,12 @@ def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6,
 
     model = BESTPretrainModel(
         D=Cfg.D, num_hand_codes=Cfg.NUM_HAND_CODES, num_body_codes=Cfg.NUM_BODY_CODES,
-        n_heads=Cfg.N_HEADS, n_layers=Cfg.N_LAYERS,
+        n_heads=Cfg.N_HEADS, n_layers=Cfg.N_LAYERS, max_pe_len=Cfg.T
     ).to(Cfg.DEVICE)
 
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    def lr_lambda(step, steps_per_epoch=len(loader)):
+    def lr_lambda(step, steps_per_epoch=len(train_loader)):
         warmup_steps = warmup_epochs * steps_per_epoch
         if step < warmup_steps:
             return step / max(1, warmup_steps)
@@ -202,8 +217,11 @@ def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6,
     step = 0
     for epoch in range(epochs):
         running = 0.0
-        for body, left, right, _ in loader:
-            body, left, right = body.to(Cfg.DEVICE), left.to(Cfg.DEVICE), right.to(Cfg.DEVICE)
+        for batch in train_loader:
+            body = batch["poses"]["upper_pose"].float().to(Cfg.DEVICE)
+            left = batch["poses"]["left_hand"].float().to(Cfg.DEVICE)
+            right = batch["poses"]["right_hand"].float().to(Cfg.DEVICE)
+
             k_l, k_r, k_b = get_pseudo_labels(tokenizer, body, left, right)
 
             out = model(body, left, right, alpha=Cfg.ALPHA)
@@ -215,9 +233,9 @@ def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6,
             sched.step()
             step += 1
             running += loss.item()
-        print(f"[pretrain] epoch {epoch+1}/{epochs}  loss={running/len(loader):.4f}  {logs}")
+        print(f"[pretrain] epoch {epoch+1}/{epochs}  loss={running/len(train_loader):.4f}  {logs}")
 
-    torch.save(model.backbone.state_dict(), "backbone_pretrained.pt")
+        torch.save(model.backbone.state_dict(), f"backbone_pretrained_{epoch}.pt")
     return model.backbone
 
 
@@ -225,8 +243,7 @@ def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6,
 # Stage 3: downstream fine-tuning (Sec. 3.4)
 # ---------------------------------------------------------------------------
 def finetune(backbone: BESTBackbone, epochs=10, lr=1e-4, decay_every=10, decay_factor=0.1):
-    dataset = SignDataSetWrapper(DATASET, Cfg.T)
-    loader = DataLoader(dataset, batch_size=Cfg.BATCH_SIZE, shuffle=True)
+    train_loader = DataLoader(TRAIN_DATASET, batch_size=Cfg.BATCH_SIZE, shuffle=True, collate_fn=SignLanguageCollator())
 
     model = BESTClassifier(backbone, num_classes=Cfg.NUM_CLASSES).to(Cfg.DEVICE)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -236,7 +253,7 @@ def finetune(backbone: BESTBackbone, epochs=10, lr=1e-4, decay_every=10, decay_f
     for epoch in range(epochs):
         model.train()
         running, correct, total = 0.0, 0, 0
-        for body, left, right, label in loader:
+        for body, left, right, label in train_loader:
             body, left, right = body.to(Cfg.DEVICE), left.to(Cfg.DEVICE), right.to(Cfg.DEVICE)
             label = label.to(Cfg.DEVICE)
 
@@ -251,7 +268,7 @@ def finetune(backbone: BESTBackbone, epochs=10, lr=1e-4, decay_every=10, decay_f
             correct += (logits.argmax(-1) == label).sum().item()
             total += label.size(0)
         sched.step()
-        print(f"[finetune] epoch {epoch+1}/{epochs}  loss={running/len(loader):.4f}  "
+        print(f"[finetune] epoch {epoch+1}/{epochs}  loss={running/len(train_loader):.4f}  "
               f"acc={correct/total:.4f}")
 
     torch.save(model.state_dict(), "best_finetuned.pt")
@@ -261,8 +278,9 @@ def finetune(backbone: BESTBackbone, epochs=10, lr=1e-4, decay_every=10, decay_f
 if __name__ == "__main__":
     print(f"Working with {Cfg.DEVICE}...")
     # Stage 1
-    tokenizer = train_tokenizer(epochs=2)          # use ~epochs=100s+ / real data in practice
+    tokenizer = train_tokenizer(epochs=100, eval_dataset=VAL_DATASET)
+    # tokenizer = load_tokenizer("tokenizer_best.pt")
     # Stage 2
-    backbone = pretrain(tokenizer, epochs=2)
-    # Stage 3
-    finetune(backbone, epochs=2)
+    backbone = pretrain(tokenizer, epochs=100)
+    # # Stage 3
+    # finetune(backbone, epochs=2)
