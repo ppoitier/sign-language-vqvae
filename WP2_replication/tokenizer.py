@@ -75,7 +75,7 @@ class VectorQuantizer(nn.Module):
     def __init__(self, num_codes: int, code_dim: int):
         super().__init__()
         self.codebook = nn.Embedding(num_codes, code_dim)
-        self.codebook.weight.data.uniform_(-1.0 / num_codes, 1.0 / num_codes)
+        # self.codebook.weight.data.uniform_(-1.0 / num_codes, 1.0 / num_codes)
 
     def forward(self, z: torch.Tensor):
         # z: (B, C) -> distances to every codeword: (B, num_codes)
@@ -88,6 +88,47 @@ class VectorQuantizer(nn.Module):
         z_q = self.codebook(indices)                  # (B, C)
         # straight-through estimator: copy gradient from z_q to z
         z_q_st = z + (z_q - z).detach()
+        return z_q_st, z_q, indices
+
+class VectorQuantizerEMA(nn.Module):
+    def __init__(self, num_codes, code_dim, decay=0.99, eps=1e-5, revive_every=50, usage_threshold=1):
+        super().__init__()
+        self.decay, self.eps = decay, eps
+        self.revive_every, self.usage_threshold = revive_every, usage_threshold
+        self.codebook = nn.Embedding(num_codes, code_dim)
+        self.codebook.weight.requires_grad_(False)   # updated by EMA, not Adam
+        self.register_buffer("cluster_size", torch.zeros(num_codes))
+        self.register_buffer("ema_w", self.codebook.weight.data.clone())
+        self.register_buffer("usage", torch.zeros(num_codes))
+        self._step = 0
+
+    def forward(self, z):
+        dist = (z.pow(2).sum(1, keepdim=True) - 2 * z @ self.codebook.weight.t()
+                + self.codebook.weight.pow(2).sum(1))
+        indices = dist.argmin(dim=1)
+        z_q = self.codebook(indices)
+        z_q_st = z + (z_q - z).detach()
+
+        if self.training:
+            with torch.no_grad():
+                one_hot = F.one_hot(indices, self.codebook.weight.shape[0]).float()
+                self.cluster_size.mul_(self.decay).add_(one_hot.sum(0), alpha=1 - self.decay)
+                self.ema_w.mul_(self.decay).add_(one_hot.t() @ z, alpha=1 - self.decay)
+                n = self.cluster_size.sum()
+                cluster_size = (self.cluster_size + self.eps) / (n + self.codebook.weight.shape[0] * self.eps) * n
+                self.codebook.weight.data.copy_(self.ema_w / cluster_size.unsqueeze(1))
+                self.usage += one_hot.sum(0)
+
+                self._step += 1
+                if self._step % self.revive_every == 0:
+                    dead = self.usage < self.usage_threshold
+                    if dead.any():
+                        idx = torch.randint(0, z.shape[0], (dead.sum(),), device=z.device)
+                        self.codebook.weight.data[dead] = z[idx]
+                        self.cluster_size[dead] = 1.0
+                        self.ema_w[dead] = z[idx]
+                    self.usage.zero_()
+
         return z_q_st, z_q, indices
 
 
@@ -103,15 +144,39 @@ class CouplingTokenizer(nn.Module):
                  num_body_codes: int = 500):
         super().__init__()
         self.encoder = TripletEncoder(d_part=d_part)
-        self.hand_quantizer = VectorQuantizer(num_hand_codes, d_part)   # Q_hand(.)
-        self.body_quantizer = VectorQuantizer(num_body_codes, d_part)   # Q_body(.)
+        self.left_hand_quantizer = VectorQuantizerEMA(num_hand_codes, d_part)   # Q_hand(.)
+        self.right_hand_quantizer = VectorQuantizerEMA(num_hand_codes, d_part)   # Q_hand(.)
+        self.body_quantizer = VectorQuantizerEMA(num_body_codes, d_part)   # Q_body(.)
         self.decoder = TripletDecoder(d_part=d_part)
+        self.weight_init = False
+
+    @torch.no_grad()
+    def init_tokenizer_weights(self, z_l, z_r, z_b):
+        z_hand = torch.cat((z_l, z_r), dim=0)   # pool left+right since codebook is shared
+        self._init_codebook_from_samples(self.left_hand_quantizer.codebook, z_l)
+        self._init_codebook_from_samples(self.right_hand_quantizer.codebook, z_r)
+        self._init_codebook_from_samples(self.body_quantizer.codebook, z_b)
+        self.weight_init = True
+
+    @staticmethod
+    def _init_codebook_from_samples(codebook: nn.Embedding, z: torch.Tensor):
+        num_codes = codebook.weight.shape[0]
+        n = z.shape[0]
+        if n >= num_codes:
+            idx = torch.randperm(n, device=z.device)[:num_codes]
+        else:
+            # not enough real samples yet: sample with replacement, and warn
+            idx = torch.randint(0, n, (num_codes,), device=z.device)
+        codebook.weight.data.copy_(z[idx])
 
     def forward(self, body, left_hand, right_hand):
+        if not self.weight_init:
+            raise ValueError("VectorQuantizer weights were not initialized. Call init_tokenizer_weights before forward pass.")
+        
         z_l, z_r, z_b = self.encoder(body, left_hand, right_hand)
 
-        zq_l_st, zq_l, k_l = self.hand_quantizer(z_l)
-        zq_r_st, zq_r, k_r = self.hand_quantizer(z_r)   # SAME codebook -> coupling
+        zq_l_st, zq_l, k_l = self.left_hand_quantizer(z_l)
+        zq_r_st, zq_r, k_r = self.right_hand_quantizer(z_r)   # SAME codebook -> coupling
         zq_b_st, zq_b, k_b = self.body_quantizer(z_b)
 
         left_hat, right_hat, body_hat = self.decoder(zq_l_st, zq_r_st, zq_b_st)
