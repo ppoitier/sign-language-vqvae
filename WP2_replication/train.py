@@ -18,7 +18,7 @@ following the same __getitem__ contract:
 """
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
 from pathlib import Path
 
@@ -26,8 +26,8 @@ from tokenizer import CouplingTokenizer, dvae_loss
 from best_model import BESTBackbone, BESTPretrainModel, BESTClassifier, mum_loss
 
 from sldl import SignLanguageDataset, SignLanguageCollator
-from sign_language_tools.pose.transforms import DropCoordinates
-from sign_language_tools.common.transforms import ApplyToAll 
+from sign_language_tools.pose.transforms import DropCoordinates, CenterOnLandmarks
+from sign_language_tools.common.transforms import ApplyToAll, MapTransform, Identity, Compose
 
 # ---------------------------------------------------------------------------
 # Config (Sec. 4.2 "Model Hyper-Parameters" / "Training Setup")
@@ -38,7 +38,7 @@ class Cfg:
     N_LAYERS = 4              # not stated explicitly in the paper; pick to fit your budget
     FFN_DIM = 2048
     NUM_HAND_CODES = 1000     # |V_hand|  (M1)
-    NUM_BODY_CODES = 1000      # |V_body|  (M2)
+    NUM_BODY_CODES = 500      # |V_body|  (M2)
     T = 256                   # frames per clip (Sec 4.2: 32 frames sampled)
     ALPHA = 0.4               # MUM mask ratio (not stated exactly; paper ablates it -- tune this)
     BATCH_SIZE = 16
@@ -46,13 +46,26 @@ class Cfg:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     ROOT = Path(__file__).resolve().parent / "data"
 
+hand_transform = Compose([
+    CenterOnLandmarks(landmark_idx=0),
+])
+
+transforms = Compose([
+    ApplyToAll(DropCoordinates("z")),
+    MapTransform({
+        'upper_pose': Identity(),
+        'left_hand': hand_transform,
+        'right_hand': hand_transform,
+    }),
+])
+
 TRAIN_DATASET = SignLanguageDataset(
     shards_url=(Cfg.ROOT / "shards" / "annotated" / "shard_000000.tar").as_uri(),
     use_windows=True,
     window_size=Cfg.T,
     window_stride=Cfg.T,
     max_empty_windows=0,
-    pose_transform=ApplyToAll(DropCoordinates('z')),
+    pose_transform=transforms,
     show_loading_progress=True,
 )
 
@@ -62,7 +75,7 @@ VAL_DATASET = SignLanguageDataset(
     window_size=Cfg.T,
     window_stride=Cfg.T,
     max_empty_windows=0,
-    pose_transform=ApplyToAll(DropCoordinates('z')),
+    pose_transform=transforms,
     show_loading_progress=True,
 )
 
