@@ -93,7 +93,8 @@ class BESTPretrainModel(nn.Module):
         super().__init__()
         self.backbone = BESTBackbone(D=D, n_heads=n_heads, n_layers=n_layers, max_pe_len=max_pe_len)
         d_part = D // 3
-        self.hand_head = nn.Linear(d_part, num_hand_codes)   # W1, b1
+        self.l_hand_head = nn.Linear(d_part, num_hand_codes)   # W1, b1
+        self.r_hand_head = nn.Linear(d_part, num_hand_codes)   # W1, b1
         self.body_head = nn.Linear(d_part, num_body_codes)   # W2, b2
 
     def forward(self, body, left_hand, right_hand, alpha: float = 0.4):
@@ -101,8 +102,8 @@ class BESTPretrainModel(nn.Module):
         d_part = f_out.shape[-1] // 3
         f_body, f_left, f_right = f_out[..., :d_part], f_out[..., d_part:2 * d_part], f_out[..., 2 * d_part:]
 
-        logits_l = self.hand_head(f_left)     # (B, T, num_hand_codes)
-        logits_r = self.hand_head(f_right)
+        logits_l = self.l_hand_head(f_left)     # (B, T, num_hand_codes)
+        logits_r = self.r_hand_head(f_right)
         logits_b = self.body_head(f_body)     # (B, T, num_body_codes)
 
         return {
@@ -119,18 +120,32 @@ def mum_loss(out, k_l, k_r, k_b):
     """
     ce = nn.functional.cross_entropy
 
+    def masked_acc(logits, targets, mask):
+        if not mask.any():
+            return logits.sum() * 0.0
+
+        logits_sel = logits[mask]
+        targets_sel = targets[mask]
+
+        preds = logits_sel.argmax(dim=-1)
+        return (preds == targets_sel).float().mean()
+    
     def masked_ce(logits, targets, mask):
-        if mask.sum() == 0:
+        if not mask.any():
             return logits.sum() * 0.0
         logits_sel = logits[mask]      # (N_masked, num_codes)
         targets_sel = targets[mask]    # (N_masked,)
         return ce(logits_sel, targets_sel)
 
     loss_l = masked_ce(out["logits_l"], k_l, out["mask_l"])
+    acc_l = masked_acc(out["logits_l"], k_l, out["mask_l"])
     loss_r = masked_ce(out["logits_r"], k_r, out["mask_r"])
+    acc_r = masked_acc(out["logits_r"], k_r, out["mask_r"])
     loss_b = masked_ce(out["logits_b"], k_b, out["mask_b"])
+    acc_b = masked_acc(out["logits_b"], k_b, out["mask_b"])
+
     total = loss_l + loss_r + loss_b
-    return total, {"loss_l": loss_l.item(), "loss_r": loss_r.item(), "loss_b": loss_b.item()}
+    return total, {"loss_l": loss_l.item(), "loss_r": loss_r.item(), "loss_b": loss_b.item(), "acc_l":acc_l.item(), "acc_r":acc_r.item(), "acc_b":acc_b.item()}
 
 
 class BESTClassifier(nn.Module):

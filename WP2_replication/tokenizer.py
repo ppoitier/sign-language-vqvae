@@ -152,7 +152,6 @@ class CouplingTokenizer(nn.Module):
 
     @torch.no_grad()
     def init_tokenizer_weights(self, z_l, z_r, z_b):
-        z_hand = torch.cat((z_l, z_r), dim=0)   # pool left+right since codebook is shared
         self._init_codebook_from_samples(self.left_hand_quantizer.codebook, z_l)
         self._init_codebook_from_samples(self.right_hand_quantizer.codebook, z_r)
         self._init_codebook_from_samples(self.body_quantizer.codebook, z_b)

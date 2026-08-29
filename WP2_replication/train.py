@@ -18,7 +18,7 @@ following the same __getitem__ contract:
 """
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
 from pathlib import Path
 
@@ -26,8 +26,8 @@ from tokenizer import CouplingTokenizer, dvae_loss
 from best_model import BESTBackbone, BESTPretrainModel, BESTClassifier, mum_loss
 
 from sldl import SignLanguageDataset, SignLanguageCollator
-from sign_language_tools.pose.transforms import DropCoordinates
-from sign_language_tools.common.transforms import ApplyToAll 
+from sign_language_tools.pose.transforms import DropCoordinates, CenterOnLandmarks
+from sign_language_tools.common.transforms import ApplyToAll, MapTransform, Identity, Compose
 
 # ---------------------------------------------------------------------------
 # Config (Sec. 4.2 "Model Hyper-Parameters" / "Training Setup")
@@ -38,13 +38,26 @@ class Cfg:
     N_LAYERS = 4              # not stated explicitly in the paper; pick to fit your budget
     FFN_DIM = 2048
     NUM_HAND_CODES = 1000     # |V_hand|  (M1)
-    NUM_BODY_CODES = 1000      # |V_body|  (M2)
+    NUM_BODY_CODES = 500      # |V_body|  (M2)
     T = 256                   # frames per clip (Sec 4.2: 32 frames sampled)
-    ALPHA = 0.4               # MUM mask ratio (not stated exactly; paper ablates it -- tune this)
+    ALPHA = 0.1               # MUM mask ratio (not stated exactly; paper ablates it -- tune this)
     BATCH_SIZE = 16
     NUM_CLASSES = 100         # e.g. MSASL100
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     ROOT = Path(__file__).resolve().parent / "data"
+
+hand_transform = Compose([
+    CenterOnLandmarks(landmark_idx=0),
+])
+
+transforms = Compose([
+    ApplyToAll(DropCoordinates("z")),
+    MapTransform({
+        'upper_pose': Identity(),
+        'left_hand': hand_transform,
+        'right_hand': hand_transform,
+    }),
+])
 
 TRAIN_DATASET = SignLanguageDataset(
     shards_url=(Cfg.ROOT / "shards" / "annotated" / "shard_000000.tar").as_uri(),
@@ -52,7 +65,7 @@ TRAIN_DATASET = SignLanguageDataset(
     window_size=Cfg.T,
     window_stride=Cfg.T,
     max_empty_windows=0,
-    pose_transform=ApplyToAll(DropCoordinates('z')),
+    pose_transform=transforms,
     show_loading_progress=True,
 )
 
@@ -62,7 +75,7 @@ VAL_DATASET = SignLanguageDataset(
     window_size=Cfg.T,
     window_stride=Cfg.T,
     max_empty_windows=0,
-    pose_transform=ApplyToAll(DropCoordinates('z')),
+    pose_transform=transforms,
     show_loading_progress=True,
 )
 
@@ -173,6 +186,7 @@ def load_tokenizer(path:str):
     )
 
     tokenizer.load_state_dict(torch.load(path, weights_only=True))
+    tokenizer.weight_init=True
     return tokenizer.to(Cfg.DEVICE)
 
 
@@ -190,8 +204,11 @@ def get_pseudo_labels(tokenizer: CouplingTokenizer, body, left, right):
     return k_l.view(B, T), k_r.view(B, T), k_b.view(B, T)
 
 
-def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6, weight_decay=0.01):
+def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6, weight_decay=0.01, eval_dataset=None, best_ckpt_path="backbone_pretrained_best.pt"):
     train_loader = DataLoader(TRAIN_DATASET, batch_size=Cfg.BATCH_SIZE, shuffle=True, collate_fn=SignLanguageCollator())
+    eval_loader = None
+    if eval_dataset is not None:
+        eval_loader = DataLoader(eval_dataset, batch_size=Cfg.BATCH_SIZE, shuffle=False, collate_fn=SignLanguageCollator())
 
     tokenizer = tokenizer.to(Cfg.DEVICE)
     for p in tokenizer.parameters():
@@ -213,14 +230,34 @@ def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6, w
 
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
+    def _prep_batch(batch):
+        mask = batch["masks"] #TODO add the mask to remove padding
+        body = batch["poses"]["upper_pose"].float().to(Cfg.DEVICE)
+        left = batch["poses"]["left_hand"].float().to(Cfg.DEVICE)
+        right = batch["poses"]["right_hand"].float().to(Cfg.DEVICE)
+        return body, left, right
+
+    @torch.no_grad()
+    def evaluate():
+        model.eval()
+        running = 0.0
+        for batch in eval_loader:
+            body, left, right = _prep_batch(batch)
+            k_l, k_r, k_b = get_pseudo_labels(tokenizer, body, left, right)
+            out = model(body, left, right, alpha=Cfg.ALPHA)
+            loss, _ = mum_loss(out, k_l, k_r, k_b)
+            running += loss.item()
+        model.train()
+        return running / len(eval_loader)
+
+    best_eval_loss = float("inf")
+
     model.train()
     step = 0
     for epoch in range(epochs):
         running = 0.0
         for batch in train_loader:
-            body = batch["poses"]["upper_pose"].float().to(Cfg.DEVICE)
-            left = batch["poses"]["left_hand"].float().to(Cfg.DEVICE)
-            right = batch["poses"]["right_hand"].float().to(Cfg.DEVICE)
+            body, left, right = _prep_batch(batch)
 
             k_l, k_r, k_b = get_pseudo_labels(tokenizer, body, left, right)
 
@@ -233,9 +270,19 @@ def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6, w
             sched.step()
             step += 1
             running += loss.item()
-        print(f"[pretrain] epoch {epoch+1}/{epochs}  loss={running/len(train_loader):.4f}  {logs}")
+        train_loss = running / len(train_loader)
+        msg = f"[pretrain] epoch {epoch+1}/{epochs}  train_loss={train_loss:.4f}  {logs}"
+
+        if eval_loader is not None:
+            eval_loss = evaluate()
+            msg += f"  eval_loss={eval_loss:.4f}"
+            if eval_loss < best_eval_loss:
+                best_eval_loss = eval_loss
+                torch.save(model.backbone.state_dict(), best_ckpt_path)
+                msg += "  (new best, saved)"
 
         torch.save(model.backbone.state_dict(), f"backbone_pretrained_{epoch}.pt")
+        print(msg)
     return model.backbone
 
 
@@ -278,9 +325,9 @@ def finetune(backbone: BESTBackbone, epochs=10, lr=1e-4, decay_every=10, decay_f
 if __name__ == "__main__":
     print(f"Working with {Cfg.DEVICE}...")
     # Stage 1
-    tokenizer = train_tokenizer(epochs=100, eval_dataset=VAL_DATASET)
-    # tokenizer = load_tokenizer("tokenizer_best.pt")
+    # tokenizer = train_tokenizer(epochs=100, eval_dataset=VAL_DATASET)
+    tokenizer = load_tokenizer("tokenizer_best.pt")
     # Stage 2
-    backbone = pretrain(tokenizer, epochs=100)
+    backbone = pretrain(tokenizer, epochs=100, eval_dataset=VAL_DATASET)
     # # Stage 3
     # finetune(backbone, epochs=2)
