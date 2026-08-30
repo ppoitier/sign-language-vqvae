@@ -16,6 +16,7 @@ following the same __getitem__ contract:
     right: (T, 21, 2) float
     label: int (only needed for fine-tuning)
 """
+import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -44,7 +45,12 @@ class Cfg:
     BATCH_SIZE = 16
     NUM_CLASSES = 100         # e.g. MSASL100
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    ROOT = Path(__file__).resolve().parent / "data"
+    # WP2_DATA_ROOT / WP2_OUTPUT_DIR let this run unchanged on the cluster
+    # (see slurm/wp2_replication) while keeping the local defaults.
+    ROOT = Path(os.environ.get("WP2_DATA_ROOT", Path(__file__).resolve().parent / "data"))
+    OUTPUT_DIR = Path(os.environ.get("WP2_OUTPUT_DIR", Path(__file__).resolve().parent))
+
+Cfg.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 hand_transform = Compose([
     CenterOnLandmarks(landmark_idx=0),
@@ -94,7 +100,7 @@ def codebook_usage(tokenizer, loader, prep_fn):
 # ---------------------------------------------------------------------------
 # Stage 1: train the coupling tokenizer (frame-level, no temporal modeling)
 # ---------------------------------------------------------------------------
-def train_tokenizer(epochs=5, lr=1e-3, decay_every=10, decay_factor=0.1, eval_dataset=None, min_samples=8000, best_ckpt_path="tokenizer_best.pt"):
+def train_tokenizer(epochs=5, lr=1e-3, decay_every=10, decay_factor=0.1, eval_dataset=None, min_samples=8000, best_ckpt_path=Cfg.OUTPUT_DIR / "tokenizer_best.pt"):
     train_loader = DataLoader(TRAIN_DATASET, batch_size=Cfg.BATCH_SIZE, shuffle=True, collate_fn=SignLanguageCollator())
     eval_loader = None
     if eval_dataset is not None:
@@ -173,7 +179,7 @@ def train_tokenizer(epochs=5, lr=1e-3, decay_every=10, decay_factor=0.1, eval_da
                 torch.save(tokenizer.state_dict(), best_ckpt_path)
                 msg += "  (new best, saved)"
 
-        torch.save(tokenizer.state_dict(), f"tokenizer_{epoch}.pt")
+        torch.save(tokenizer.state_dict(), Cfg.OUTPUT_DIR / "tokenizer_last.pt")
         print(msg)
 
     return tokenizer
@@ -204,7 +210,7 @@ def get_pseudo_labels(tokenizer: CouplingTokenizer, body, left, right):
     return k_l.view(B, T), k_r.view(B, T), k_b.view(B, T)
 
 
-def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6, weight_decay=0.01, eval_dataset=None, best_ckpt_path="backbone_pretrained_best.pt"):
+def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6, weight_decay=0.01, eval_dataset=None, best_ckpt_path=Cfg.OUTPUT_DIR / "backbone_pretrained_best.pt"):
     train_loader = DataLoader(TRAIN_DATASET, batch_size=Cfg.BATCH_SIZE, shuffle=True, collate_fn=SignLanguageCollator())
     eval_loader = None
     if eval_dataset is not None:
@@ -281,7 +287,7 @@ def pretrain(tokenizer: CouplingTokenizer, epochs=5, lr=1e-4, warmup_epochs=6, w
                 torch.save(model.backbone.state_dict(), best_ckpt_path)
                 msg += "  (new best, saved)"
 
-        torch.save(model.backbone.state_dict(), f"backbone_pretrained_{epoch}.pt")
+        torch.save(model.backbone.state_dict(), Cfg.OUTPUT_DIR / "backbone_pretrained_last.pt")
         print(msg)
     return model.backbone
 
@@ -318,16 +324,16 @@ def finetune(backbone: BESTBackbone, epochs=10, lr=1e-4, decay_every=10, decay_f
         print(f"[finetune] epoch {epoch+1}/{epochs}  loss={running/len(train_loader):.4f}  "
               f"acc={correct/total:.4f}")
 
-    torch.save(model.state_dict(), "best_finetuned.pt")
+    torch.save(model.state_dict(), Cfg.OUTPUT_DIR / "best_finetuned.pt")
     return model
 
 
 if __name__ == "__main__":
     print(f"Working with {Cfg.DEVICE}...")
     # Stage 1
-    # tokenizer = train_tokenizer(epochs=100, eval_dataset=VAL_DATASET)
-    tokenizer = load_tokenizer("tokenizer_best.pt")
+    tokenizer = train_tokenizer(epochs=100, eval_dataset=VAL_DATASET)
+    # tokenizer = load_tokenizer(Cfg.OUTPUT_DIR / "tokenizer_best.pt")
     # Stage 2
-    backbone = pretrain(tokenizer, epochs=100, eval_dataset=VAL_DATASET)
+    # backbone = pretrain(tokenizer, epochs=100, eval_dataset=VAL_DATASET)
     # # Stage 3
     # finetune(backbone, epochs=2)
