@@ -12,7 +12,7 @@ from sl_vqvae.scripts.results import save_results
 from sl_vqvae.trainer.vqvae_module import VQVAETrainingModule
 from sl_vqvae.random import set_seed
 
-torch.set_float32_matmul_precision('medium')
+torch.set_float32_matmul_precision('high')
 
 
 def train(config: TrainConfig) -> None:
@@ -55,6 +55,7 @@ def train(config: TrainConfig) -> None:
         logger=logger,
         callbacks=[checkpoint_callback],
         enable_progress_bar=config.trainer.enable_progress_bar,
+        gradient_clip_val=config.trainer.gradient_clip_val,
     )
     trainer.fit(
         module,

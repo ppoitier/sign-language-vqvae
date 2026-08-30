@@ -1,0 +1,29 @@
+{
+  "data": {
+    "root": "/gpfs/scratch/acad/lsfb/datasets/lsfb-cont",
+    "batch_size": 64,
+    "num_workers": 0,
+    "annotated": true
+  },
+  "model": {
+    "type": "transformer",
+    "embedding_dim": 256,
+    "n_embeddings": 1000,
+    "max_length": 500
+  },
+  "optimizer": {
+    "learning_rate": 3e-4,
+    "weight_decay": 0.0
+  },
+  "trainer": {
+    "experiment_name": "transformer_vqvae",
+    "log_dir": "/gpfs/scratch/acad/lsfb/outputs/sign-language-vqvae/logs",
+    "checkpoint_dir": "/gpfs/scratch/acad/lsfb/outputs/sign-language-vqvae/checkpoints",
+    "max_epochs": 200,
+    "log_every_n_steps": 10,
+    "enable_progress_bar": false,
+    "fast_dev_run": false,
+    "run_test_after_fit": true,
+    "results_path": "/gpfs/scratch/acad/lsfb/outputs/sign-language-vqvae/results/transformer_vqvae.npy"
+  }
+}

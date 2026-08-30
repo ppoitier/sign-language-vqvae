@@ -85,6 +85,7 @@ class TrainerConfig(StrictModel):
     run_test_after_fit: bool = True
     results_path: str | None = None
     compile_model: bool = True
+    gradient_clip_val: float | None = 1.0
 
 
 class TrainConfig(StrictModel):

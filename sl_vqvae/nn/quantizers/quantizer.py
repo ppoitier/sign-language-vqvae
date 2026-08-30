@@ -83,7 +83,9 @@ class Quantizer(nn.Module):
 class QuantizerEMA(nn.Module):
     """
     EMA-updated codebook variant. The codebook is not trained by gradient descent;
-    only the commitment loss reaches the encoder.
+    only the commitment loss reaches the encoder. Codes that fall unused are
+    periodically revived from batch samples (see `_revive_dead_codes`) so usage
+    can't collapse permanently onto a handful of codes.
     """
 
     def __init__(
@@ -93,6 +95,7 @@ class QuantizerEMA(nn.Module):
         commitment_loss_factor: float,
         decay: float = 0.99,
         eps: float = 1e-5,
+        dead_code_threshold: float = 1.0,
     ):
         super().__init__()
         self.embedding_dim = embedding_dim
@@ -100,6 +103,10 @@ class QuantizerEMA(nn.Module):
         self.decay = decay
         self.eps = eps
         self.commitment_loss_factor = commitment_loss_factor
+        # A code whose EMA cluster size decays below this is considered dead
+        # and gets replaced (see `_revive_dead_codes`), so it never lingers
+        # long enough to hit the eps floor in the smoothing below.
+        self.dead_code_threshold = dead_code_threshold
 
         embeddings = torch.randn(n_embeddings, embedding_dim)
         self.register_buffer("embeddings", embeddings)
@@ -145,6 +152,8 @@ class QuantizerEMA(nn.Module):
                     self.ema_embed / smoothed_cluster_size.unsqueeze(-1)
                 )
 
+                self._revive_dead_codes(z_flat)
+
         # Only the commitment loss, since the codebook is updated by EMA.
         loss = self.commitment_loss_factor * F.mse_loss(z, quantized.detach())
 
@@ -156,6 +165,23 @@ class QuantizerEMA(nn.Module):
             quantized_indices=encoding_indices.reshape(input_shape[:-1]),
             loss=loss,
         )
+
+    def _revive_dead_codes(self, z_flat: Tensor) -> None:
+        """Reset codes whose EMA usage has decayed away to random vectors
+        sampled from this batch, instead of leaving them to drift off toward
+        the data manifold via the eps floor in the smoothing above. Without
+        this, a code that stops being picked never gets picked again --
+        usage collapses onto a handful of codes and stays there.
+        """
+        dead = self.cluster_size < self.dead_code_threshold
+        n_dead = int(dead.sum())
+        if n_dead == 0:
+            return
+
+        samples = z_flat[torch.randint(0, z_flat.shape[0], (n_dead,), device=z_flat.device)]
+        self.embeddings[dead] = samples
+        self.ema_embed[dead] = samples
+        self.cluster_size[dead] = self.dead_code_threshold
 
 
 if __name__ == "__main__":
