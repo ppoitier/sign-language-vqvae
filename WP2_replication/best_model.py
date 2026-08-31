@@ -51,9 +51,9 @@ class BESTBackbone(nn.Module):
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=D, nhead=n_heads, dim_feedforward=ffn_dim,
-            dropout=dropout, batch_first=True, activation="gelu",
+            dropout=dropout, batch_first=True, activation="gelu",norm_first=True
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers,norm=nn.LayerNorm(D))
 
     def forward(self, body, left_hand, right_hand, alpha: float = None):
         """
