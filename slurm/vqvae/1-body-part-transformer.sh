@@ -15,7 +15,7 @@
 #
 #SBATCH --account=lsfb
 #
-#SBATCH --output=./out/1-body-part-transformer/%j.out
+#SBATCH --output=./out/1-body-part-transformer-medium/%j.out
 
 module purge
 module load EasyBuild/2025a
@@ -33,7 +33,7 @@ which python
 python --version
 
 repo_dir="$HOME/repositories/sign-language-vqvae"
-config_file="configs/cluster/body_part_vqvae.json"
+config_file="configs/cluster/body_part_vqvae_medium.json"
 
 cd "$repo_dir"
 
