@@ -1,8 +1,8 @@
 from torch.utils.data import DataLoader
 from sldl import SignLanguageDataset, SignLanguageCollator
 
-from sign_language_tools.common.transforms import ApplyToAll, Compose
-from sign_language_tools.pose.transforms import DropCoordinates
+from sign_language_tools.common.transforms import ApplyToAll, Compose, MapTransform, Identity
+from sign_language_tools.pose.transforms import DropCoordinates, CenterOnLandmarks, HorizontalFlip
 
 
 def load_dataset(root: str, annotated: bool = True, split: str = "training"):
@@ -17,9 +17,25 @@ def load_dataset(root: str, annotated: bool = True, split: str = "training"):
     shard_folder = "annotated" if annotated else "unannotated"
     shards_url = f"{root}/shards/{shard_folder}/{shard_files}"
 
+    hand_transform = Compose([
+        CenterOnLandmarks(landmark_idx=0),
+    ])
+
+    transforms = Compose([
+        ApplyToAll(DropCoordinates("z")),
+        MapTransform({
+            'upper_pose': Identity(),
+            'left_hand': Compose([
+                HorizontalFlip(),
+                CenterOnLandmarks(landmark_idx=0),
+            ]),
+            'right_hand': CenterOnLandmarks(landmark_idx=0),
+        }),
+    ])
+
     return SignLanguageDataset(
         shards_url=shards_url,
-        pose_transform=ApplyToAll(DropCoordinates("z")),
+        pose_transform=transforms,
         use_windows=True,
         window_size=500,
         window_stride=400,

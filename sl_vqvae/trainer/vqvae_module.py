@@ -1,48 +1,31 @@
-from pathlib import Path
-
 import lightning as L
-import numpy as np
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 from sl_vqvae.metrics.vqvae.perplexity import CodebookPerplexity
 from sl_vqvae.metrics.vqvae.reconstruction import MaskedMPJPE
-from sl_vqvae.nn.vqvae.transformer import (
-    TransformerVQVAE,
-    TransformerVQVAE_Output,
-)
-
-
-def flatten_poses(poses, body_parts):
-    poses = torch.cat([poses[body_part] for body_part in body_parts], dim=2)
-    N, T, L, C = poses.shape
-    return poses.reshape(N, T, -1).contiguous()
+from sl_vqvae.nn.vqvae.output import VQVAEOutput
 
 
 class VQVAETrainingModule(L.LightningModule):
-    """LightningModule that trains a `TransformerVQVAE` pose tokenizer.
+    """LightningModule that trains any dict-in/dict-out VQ-VAE pose tokenizer:
+    `model(poses: dict[str, Tensor], mask: Tensor) -> VQVAEOutput`.
 
-    The model (`TransformerVQVAE`) already knows how to reconstruct a pose
-    sequence and compute its own loss (reconstruction + vector-quantization).
-    This module only owns the *training policy* around it: turning a raw
-    batch into model inputs, logging losses, tracking metrics, and
-    configuring the optimizer.
-
-    Metrics (see the `sl_vqvae.metrics.vqvae` sub-module for what they mean
-    and why they're tracked):
-        - `mpjpe`: Mean Per-Joint Position Error, the reconstruction quality
-          in real coordinate units.
-        - `perplexity`: effective number of codebook entries in use, a
-          codebook-collapse warning signal.
+    This covers both `TransformerVQVAE` (one codebook shared by all body
+    parts) and `BodyPartTransformerVQVAE` (one codebook per modality) -- the
+    model tells this module how its body parts are grouped into codebooks via
+    `model.modality_groups`, and metrics are tracked per group rather than
+    globally, so a collapsed or poorly reconstructing codebook doesn't hide
+    behind a single aggregate number (see `sl_vqvae.metrics.vqvae` for what
+    each metric means).
     """
 
     def __init__(
         self,
-        model: TransformerVQVAE,
+        model: nn.Module,
         learning_rate: float = 3e-4,
         weight_decay: float = 0.0,
         num_coordinates: int = 2,
-        body_parts: tuple[str, ...] = ('upper_pose', 'left_hand', 'right_hand'),
         cache_test_outputs: bool = True,
     ):
         super().__init__()
@@ -55,25 +38,40 @@ class VQVAETrainingModule(L.LightningModule):
         self.test_outputs = dict()
         self.save_hyperparameters(ignore=["model", "test_outputs"])
 
-        self.body_parts = body_parts
+        self.modality_groups: dict[str, list[str]] = model.modality_groups
 
         # Separate metric instances per stage: each accumulates over its own
         # epoch and must not mix train/val/test running state.
-        self.train_perplexity = CodebookPerplexity(model.n_embeddings)
-        self.val_perplexity = CodebookPerplexity(model.n_embeddings)
-        self.test_perplexity = CodebookPerplexity(model.n_embeddings)
-        self.train_mpjpe = MaskedMPJPE(num_coordinates)
-        self.val_mpjpe = MaskedMPJPE(num_coordinates)
-        self.test_mpjpe = MaskedMPJPE(num_coordinates)
+        self.train_perplexity = self._build_perplexity_metrics()
+        self.val_perplexity = self._build_perplexity_metrics()
+        self.test_perplexity = self._build_perplexity_metrics()
+        self.train_mpjpe = self._build_mpjpe_metrics()
+        self.val_mpjpe = self._build_mpjpe_metrics()
+        self.test_mpjpe = self._build_mpjpe_metrics()
 
-    def _metrics(self, stage: str) -> tuple[CodebookPerplexity, MaskedMPJPE]:
+    def _build_perplexity_metrics(self) -> nn.ModuleDict:
+        return nn.ModuleDict(
+            {
+                modality: CodebookPerplexity(self.model.n_embeddings(body_parts[0]))
+                for modality, body_parts in self.modality_groups.items()
+            }
+        )
+
+    def _build_mpjpe_metrics(self) -> nn.ModuleDict:
+        # Per body part, not per modality group: body parts in the same group
+        # (e.g. left_hand/right_hand) can still have different landmark
+        # counts than others, so they can't always be pooled into one metric.
+        body_parts = [bp for parts in self.modality_groups.values() for bp in parts]
+        return nn.ModuleDict({body_part: MaskedMPJPE(self.num_coordinates) for body_part in body_parts})
+
+    def _metrics(self, stage: str) -> tuple[nn.ModuleDict, nn.ModuleDict]:
         if stage == "training":
             return self.train_perplexity, self.train_mpjpe
         if stage == "test":
             return self.test_perplexity, self.test_mpjpe
         return self.val_perplexity, self.val_mpjpe
 
-    def _log_losses(self, output: TransformerVQVAE_Output, stage: str, batch_size: int) -> None:
+    def _log_losses(self, output: VQVAEOutput, stage: str, batch_size: int) -> None:
         self.log_dict(
             {
                 f"{stage}/loss": output.total_loss,
@@ -86,20 +84,36 @@ class VQVAETrainingModule(L.LightningModule):
             batch_size=batch_size,
         )
 
-    def _update_metrics(self, output: TransformerVQVAE_Output, x: Tensor, mask: Tensor, stage: str) -> None:
+    def _update_metrics(
+        self, output: VQVAEOutput, poses: dict[str, Tensor], mask: Tensor, stage: str
+    ) -> None:
         perplexity, mpjpe = self._metrics(stage)
-        mpjpe(output.reconstructed_input, x, mask)
-        perplexity(output.quantized_indices[mask])
-        self.log(f"{stage}/mpjpe", mpjpe, on_step=False, on_epoch=True)
-        self.log(f"{stage}/perplexity", perplexity, on_step=False, on_epoch=True)
 
-    def forward_step(self, batch: dict, stage: str) -> tuple[Tensor, TransformerVQVAE_Output]:
+        # Perplexity: one instance per codebook group. Combining indices
+        # across body parts sharing a codebook is safe regardless of how
+        # many landmarks each body part has (indices don't carry shape).
+        for modality, body_parts in self.modality_groups.items():
+            indices = torch.cat(
+                [output.quantizer_outputs[bp].quantized_indices[mask] for bp in body_parts]
+            )
+            perplexity[modality](indices)
+            self.log(
+                f"{stage}/perplexity/{modality}", perplexity[modality], on_step=False, on_epoch=True
+            )
+
+        # MPJPE: one instance per body part, since it reshapes back into
+        # landmarks and body parts can have different landmark counts.
+        for body_part, recon in output.reconstructions.items():
+            mpjpe[body_part](recon.flatten(2), poses[body_part].flatten(2), mask)
+            self.log(f"{stage}/mpjpe/{body_part}", mpjpe[body_part], on_step=False, on_epoch=True)
+
+    def forward_step(self, batch: dict, stage: str) -> tuple[Tensor, VQVAEOutput]:
+        poses = {k: v.float() for k, v in batch["poses"].items()}
         mask = batch["masks"]
-        x = flatten_poses(batch["poses"], self.body_parts).float()
-        output = self.model(x, mask)
+        output = self.model(poses, mask)
 
         self._log_losses(output, stage, batch_size=mask.shape[0])
-        self._update_metrics(output, x, mask, stage)
+        self._update_metrics(output, poses, mask, stage)
 
         return output.total_loss, output
 
@@ -112,21 +126,26 @@ class VQVAETrainingModule(L.LightningModule):
         return loss
 
     def on_test_epoch_start(self) -> None:
-        if self.test_output_dir is not None:
-            self.test_output_dir.mkdir(parents=True, exist_ok=True)
+        self.test_outputs.clear()
 
     def test_step(self, batch: dict, batch_idx: int) -> Tensor:
         loss, output = self.forward_step(batch, "test")
 
-        # TODO: we have to split output into samples
         if self.cache_test_outputs:
-            self.test_outputs.update({
-                sample_id: {
-                    'recon_poses': output.reconstructed_input,
-                    'tokens': output.quantized_indices,
+            window_ids = batch["window_id"]
+            lengths = batch["lengths"]
+            for i, window_id in enumerate(window_ids):
+                length = lengths[i].item()
+                self.test_outputs[window_id] = {
+                    "recon_poses": {
+                        body_part: recon[i, :length].detach().cpu().half()
+                        for body_part, recon in output.reconstructions.items()
+                    },
+                    "tokens": {
+                        body_part: q.quantized_indices[i, :length].detach().cpu().to(torch.int16)
+                        for body_part, q in output.quantizer_outputs.items()
+                    },
                 }
-                for sample_id, output in zip(batch['id'], output)
-            })
 
         return loss
 

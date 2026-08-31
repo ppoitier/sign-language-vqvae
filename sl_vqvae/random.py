@@ -1,0 +1,20 @@
+import random
+from typing import Literal
+
+import numpy as np
+import torch
+import lightning
+
+
+def set_seed(seed: int | Literal['random'] = 'random') -> int:
+    if seed == 'random':
+        seed = random.randint(a=0, b=1_000_000)
+        print(f"Random seed: {seed:_}")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    lightning.seed_everything(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    return seed
