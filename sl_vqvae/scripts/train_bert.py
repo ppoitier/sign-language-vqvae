@@ -5,37 +5,38 @@ import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 
-from sl_vqvae.config import TrainConfig
+from sl_vqvae.config import BERTTrainConfig
 from sl_vqvae.data import load_datasets_and_dataloaders
-from sl_vqvae.nn.vqvae.factory import build_model
-from sl_vqvae.scripts.results import save_results
-from sl_vqvae.trainer.vqvae_module import VQVAETrainingModule
+from sl_vqvae.nn.bert.factory import build_model
 from sl_vqvae.random import set_seed
+from sl_vqvae.targets.token_target import TokenTarget
+from sl_vqvae.trainer.bert_module import BERTTrainingModule
 
 torch.set_float32_matmul_precision('high')
 
 
-def train(config: TrainConfig) -> None:
+def train(config: BERTTrainConfig) -> None:
     seed = config.seed
     seed = 'random' if seed is None else seed
     seed = set_seed(seed)
 
+    targets = {"tokens": TokenTarget(config.data.tokens_path)}
     _, dataloaders = load_datasets_and_dataloaders(
         config.data.root,
         batch_size=config.data.batch_size,
         n_workers=config.data.num_workers,
+        annotated=config.data.annotated,
+        targets=targets,
     )
 
     model = build_model(config.model)
     if config.trainer.compile_model:
         model = torch.compile(model)
 
-    module = VQVAETrainingModule(
+    module = BERTTrainingModule(
         model,
         learning_rate=config.optimizer.learning_rate,
         weight_decay=config.optimizer.weight_decay,
-        num_coordinates=config.num_coordinates,
-        cache_test_outputs=config.cache_test_outputs,
     )
 
     logger = TensorBoardLogger(save_dir=config.trainer.log_dir + f'/{seed}', name=config.trainer.experiment_name)
@@ -56,6 +57,7 @@ def train(config: TrainConfig) -> None:
         callbacks=[checkpoint_callback],
         enable_progress_bar=config.trainer.enable_progress_bar,
         gradient_clip_val=config.trainer.gradient_clip_val,
+        overfit_batches=config.trainer.overfit_batches,
     )
     trainer.fit(
         module,
@@ -65,16 +67,14 @@ def train(config: TrainConfig) -> None:
 
     if config.trainer.run_test_after_fit and not config.trainer.fast_dev_run:
         trainer.test(module, dataloaders=dataloaders["testing"], ckpt_path="best")
-        if config.trainer.results_path:
-            save_results(module.test_outputs, config.trainer.results_path + f'/{seed}')
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a VQ-VAE model on sign language pose sequences.")
+    parser = argparse.ArgumentParser(description="Pretrain a BERT-style masked-pose model on sign language pose sequences.")
     parser.add_argument("--config", required=True, help="Path to a JSON training config file.")
     args = parser.parse_args()
 
-    config = TrainConfig.from_json(args.config)
+    config = BERTTrainConfig.from_json(args.config)
     train(config)
 
 

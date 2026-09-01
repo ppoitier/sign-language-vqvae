@@ -5,6 +5,7 @@ import lightning as L
 from sl_vqvae.config import TestConfig
 from sl_vqvae.data import load_dataloader, load_dataset
 from sl_vqvae.nn.vqvae.factory import build_model
+from sl_vqvae.scripts.checkpoint import load_module
 from sl_vqvae.scripts.results import save_results
 from sl_vqvae.trainer.vqvae_module import VQVAETrainingModule
 
@@ -19,7 +20,8 @@ def test(config: TestConfig) -> dict:
     )
 
     model = build_model(config.model)
-    module = VQVAETrainingModule.load_from_checkpoint(
+    module = load_module(
+        VQVAETrainingModule,
         config.testing.checkpoint_path,
         model=model,
         num_coordinates=config.num_coordinates,

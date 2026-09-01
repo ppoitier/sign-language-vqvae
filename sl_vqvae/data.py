@@ -1,11 +1,17 @@
 from torch.utils.data import DataLoader
 from sldl import SignLanguageDataset, SignLanguageCollator
+from sldl.targets import TargetEncoder
 
 from sign_language_tools.common.transforms import ApplyToAll, Compose, MapTransform, Identity
 from sign_language_tools.pose.transforms import DropCoordinates, CenterOnLandmarks, HorizontalFlip
 
 
-def load_dataset(root: str, annotated: bool = True, split: str = "training"):
+def load_dataset(
+    root: str,
+    annotated: bool = True,
+    split: str = "training",
+    targets: dict[str, TargetEncoder] | None = None,
+):
     if split == "training":
         shard_files = "shard_{000002..000007}.tar"
     elif split == "validation":
@@ -41,28 +47,35 @@ def load_dataset(root: str, annotated: bool = True, split: str = "training"):
         window_stride=400,
         max_empty_windows=0,
         show_loading_progress=True,
+        targets=targets,
     )
 
 
-def load_dataloader(dataset, batch_size, shuffle=True, num_workers=0):
+def load_dataloader(dataset, batch_size, shuffle=True, num_workers=0, targets: dict[str, TargetEncoder] | None = None):
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        collate_fn=SignLanguageCollator(),
+        collate_fn=SignLanguageCollator(targets=targets),
     )
 
 
-def load_datasets_and_dataloaders(root: str, batch_size=16, n_workers=0):
+def load_datasets_and_dataloaders(
+    root: str, batch_size=16, n_workers=0, annotated: bool = True, targets: dict[str, TargetEncoder] | None = None
+):
     datasets = {
-        x: load_dataset(root, annotated=True, split=x)
+        x: load_dataset(root, annotated=annotated, split=x, targets=targets)
         for x in ["training", "validation", "testing"]
     }
 
     data_loaders = {
         x: load_dataloader(
-            datasets[x], batch_size=batch_size, shuffle=(x == "training"), num_workers=n_workers
+            datasets[x],
+            batch_size=batch_size,
+            shuffle=(x == "training"),
+            num_workers=n_workers,
+            targets=targets,
         )
         for x in ["training", "validation", "testing"]
     }

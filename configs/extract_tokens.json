@@ -1,0 +1,18 @@
+{
+  "data": {
+    "root": "E:/datasets/sign-language/lsfb-cont",
+    "batch_size": 64,
+    "num_workers": 0,
+    "annotated": true
+  },
+  "model": {
+    "type": "body_part_transformer",
+    "embedding_dim": 256,
+    "max_length": 500
+  },
+  "testing": {
+    "checkpoint_path": "D:/data/lucia/vqvae/sign-language-vqvae/checkpoints/917394/best.ckpt",
+    "results_path": "D:/data/lucia/vqvae/sign-language-vqvae/checkpoints/917394/tokens.npy",
+    "enable_progress_bar": true
+  }
+}

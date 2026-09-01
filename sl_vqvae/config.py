@@ -19,6 +19,12 @@ class DataConfig(StrictModel):
     annotated: bool = True
 
 
+class BERTDataConfig(DataConfig):
+    # Path to the `{window_id: {body_part: tokens}}` .npy file saved by
+    # `sl_vqvae.scripts.extract_tokens`, loaded by `sl_vqvae.targets.TokenTarget`.
+    tokens_path: str
+
+
 class TransformerModelConfig(StrictModel):
     type: Literal["transformer"] = "transformer"
     embedding_dim: int = 256
@@ -69,6 +75,28 @@ ModelConfig = Annotated[
 ]
 
 
+class BERTModelConfig(StrictModel):
+    embedding_dim: int = 256
+    body_part_mapping: dict[str, str] = {
+        "upper_pose": "pose",
+        "left_hand": "hand",
+        "right_hand": "hand",
+    }
+    n_embeddings: dict[str, int] = {"pose": 500, "hand": 1000}
+    n_pose_landmarks: int = 23
+    n_hand_landmarks: int = 21
+    gcn_hidden_dim: int = 128
+    gcn_layers: int = 2
+    max_length: int = 500
+    n_heads: int = 4
+    n_layers: int = 4
+    dim_feedforward: int = 1024
+    dropout: float = 0.1
+    pos_encoding: str = "rope"
+    attn_mask_strategy: str | None = None
+    mask_ratio: float = 0.4
+
+
 class OptimizerConfig(StrictModel):
     learning_rate: float = 3e-4
     weight_decay: float = 0.0
@@ -86,6 +114,7 @@ class TrainerConfig(StrictModel):
     results_path: str | None = None
     compile_model: bool = True
     gradient_clip_val: float | None = 1.0
+    overfit_batches: float = 0.0
 
 
 class TrainConfig(StrictModel):
@@ -99,6 +128,18 @@ class TrainConfig(StrictModel):
 
     @classmethod
     def from_json(cls, path: str | Path) -> "TrainConfig":
+        return cls.model_validate_json(Path(path).read_text())
+
+
+class BERTTrainConfig(StrictModel):
+    data: BERTDataConfig
+    model: BERTModelConfig = BERTModelConfig()
+    optimizer: OptimizerConfig = OptimizerConfig()
+    trainer: TrainerConfig
+    seed: int | None = None
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "BERTTrainConfig":
         return cls.model_validate_json(Path(path).read_text())
 
 
