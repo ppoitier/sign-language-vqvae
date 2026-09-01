@@ -1,0 +1,16 @@
+Annotated Data + Latent Features from BERT (+ Latent Features from MaskGIT) --> Gloss Sequence
+
+Video --> wizard shit / voodoo magic --> " Je regarder télévision".
+
+
+What we can do ?:
+
+Option 1 :
+
+Video --> VQ-VAE --> BERT / MaskGIT Encoder --> CSLR Head --> CTC Loss
+
+
+We will use a Transformer encorder with also after the CTC Loss
+
+
+You also just lost the Game.
