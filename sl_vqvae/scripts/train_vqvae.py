@@ -24,6 +24,11 @@ def train(config: TrainConfig) -> None:
         config.data.root,
         batch_size=config.data.batch_size,
         n_workers=config.data.num_workers,
+        annotated=config.data.annotated,
+        train_split=config.data.train_split,
+        window_size=config.data.window_size,
+        window_stride=config.data.window_stride,
+        max_empty_windows=config.data.max_empty_windows,
     )
 
     model = build_model(config.model)

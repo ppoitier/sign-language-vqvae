@@ -1,0 +1,31 @@
+{
+  "data": {
+    "root": "/gpfs/scratch/acad/lsfb/datasets/lsfb-cont",
+    "tokens_path": "/gpfs/scratch/acad/lsfb/outputs/sign-language-vqvae/results/tokens_unannotated.npy",
+    "batch_size": 64,
+    "num_workers": 0,
+    "annotated": true,
+    "train_split": "training_with_unannotated"
+  },
+  "model": {
+    "embedding_dim": 128,
+    "max_length": 500,
+    "dropout": 0.1,
+    "n_layers": 4
+  },
+  "optimizer": {
+    "learning_rate": 3e-4,
+    "weight_decay": 0.0
+  },
+  "trainer": {
+    "experiment_name": "bert_base_unannotated",
+    "log_dir": "/gpfs/scratch/acad/lsfb/outputs/sign-language-bert/logs",
+    "checkpoint_dir": "/gpfs/scratch/acad/lsfb/outputs/sign-language-bert/checkpoints",
+    "max_epochs": 300,
+    "log_every_n_steps": 10,
+    "enable_progress_bar": false,
+    "fast_dev_run": false,
+    "run_test_after_fit": true,
+    "compile_model": true
+  }
+}

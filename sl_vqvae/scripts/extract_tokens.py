@@ -32,9 +32,18 @@ def extract_tokens(config: TestConfig) -> dict:
 
     trainer = L.Trainer(logger=False, enable_progress_bar=config.testing.enable_progress_bar)
 
+    splits = {"training": config.data.train_split, "validation": "validation", "testing": "testing"}
+
     tokens: dict = {}
-    for split in ("training", "validation", "testing"):
-        dataset = load_dataset(config.data.root, annotated=config.data.annotated, split=split)
+    for split in splits.values():
+        dataset = load_dataset(
+            config.data.root,
+            annotated=config.data.annotated,
+            split=split,
+            window_size=config.data.window_size,
+            window_stride=config.data.window_stride,
+            max_empty_windows=config.data.max_empty_windows,
+        )
         dataloader = load_dataloader(
             dataset,
             batch_size=config.data.batch_size,

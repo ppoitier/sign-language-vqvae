@@ -17,6 +17,10 @@ class DataConfig(StrictModel):
     batch_size: int = 16
     num_workers: int = 0
     annotated: bool = True
+    train_split: Literal["training", "training_with_unannotated"] = "training"
+    window_size: int = 500
+    window_stride: int = 400
+    max_empty_windows: int | None = 0
 
 
 class BERTDataConfig(DataConfig):
