@@ -97,6 +97,24 @@ class BERTModelConfig(StrictModel):
     mask_ratio: float = 0.4
 
 
+class CSLRModelConfig(StrictModel):
+    embedding_dim: int = 256
+    body_parts: list[str] = ["upper_pose", "left_hand", "right_hand"]
+    n_pose_landmarks: int = 23
+    n_hand_landmarks: int = 21
+    gcn_hidden_dim: int = 128
+    gcn_layers: int = 2
+    max_length: int = 500
+    n_heads: int = 4
+    n_layers: int = 4
+    dim_feedforward: int = 1024
+    dropout: float = 0.1
+    pos_encoding: str = "rope"
+    attn_mask_strategy: str | None = None
+    vocab_size: int = 1000
+    pretrained_bert_checkpoint: str | None = None
+
+
 class OptimizerConfig(StrictModel):
     learning_rate: float = 3e-4
     weight_decay: float = 0.0
