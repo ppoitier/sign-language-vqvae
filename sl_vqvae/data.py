@@ -23,10 +23,6 @@ def load_dataset(
     shard_folder = "annotated" if annotated else "unannotated"
     shards_url = f"{root}/shards/{shard_folder}/{shard_files}"
 
-    hand_transform = Compose([
-        CenterOnLandmarks(landmark_idx=0),
-    ])
-
     transforms = Compose([
         ApplyToAll(DropCoordinates("z")),
         MapTransform({
