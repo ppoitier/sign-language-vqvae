@@ -105,11 +105,52 @@ class CSLRTrainingModule(L.LightningModule):
             on_epoch=True,
         )
 
+    def _validate_ctc_inputs(self, labels: Tensor, label_lengths: Tensor, input_lengths: Tensor) -> None:
+        """Check CTC preconditions eagerly on CPU, before the compiled model runs.
+
+        The CUDA CTC kernel does not bounds-check its arguments: an out-of-range
+        target id, an empty (all-padding) window, or a sample whose gloss count
+        exceeds its valid-frame count all read out of bounds and surface much
+        later as a bare `illegal memory access` at the first host-device sync
+        (F.ctc_loss), with a traceback that points at the sync rather than the
+        real cause. Failing here instead turns that into an actionable error.
+        Note `zero_infinity=True` does NOT protect against target_length >
+        input_length on CUDA -- the bad read happens before the clamp.
+        """
+        labels = labels.cpu()
+        input_lengths = input_lengths.cpu()
+        label_lengths = label_lengths.cpu()
+
+        # Real (non-padding) target ids must be valid class indices [0, vocab_size).
+        real = labels[labels != self.label_pad_value]
+        if real.numel() and (real.min() < 0 or real.max() >= self.blank_id):
+            raise RuntimeError(
+                f"CTC target ids out of range [0, {self.blank_id}): "
+                f"min={real.min().item()}, max={real.max().item()}."
+            )
+
+        empty = (input_lengths == 0).nonzero(as_tuple=True)[0]
+        if empty.numel():
+            raise RuntimeError(
+                f"{empty.numel()} sample(s) have input_length == 0 (fully-padded window); "
+                f"first offending batch indices: {empty[:10].tolist()}."
+            )
+
+        infeasible = (label_lengths > input_lengths).nonzero(as_tuple=True)[0]
+        if infeasible.numel():
+            pairs = [(i.item(), label_lengths[i].item(), input_lengths[i].item()) for i in infeasible[:10]]
+            raise RuntimeError(
+                f"{infeasible.numel()} sample(s) have target_length > input_length, which the CUDA "
+                f"CTC kernel cannot handle even with zero_infinity=True. "
+                f"(batch_idx, label_length, input_length): {pairs}."
+            )
+
     def forward_step(self, batch: dict, stage: str) -> Tensor:
         poses = {k: v.float() for k, v in batch["poses"].items()}
         mask = batch["masks"]
         labels = batch["targets"]["labels"].long()
         label_lengths = (labels != self.label_pad_value).sum(dim=1)
+        self._validate_ctc_inputs(labels, label_lengths, mask.sum(dim=1))
         output = self.model(poses, mask, labels, label_lengths)
 
         self._log_loss(output, stage, batch_size=mask.shape[0])

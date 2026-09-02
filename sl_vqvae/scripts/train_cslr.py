@@ -29,6 +29,11 @@ def train(config: CSLRTrainConfig) -> None:
             # real class id -- CSLRTrainingModule derives label lengths from
             # this same value (see its docstring).
             pad_value=config.model.vocab_size,
+            # Annotation rows with a missing/NaN lemma (no known gloss) get the
+            # same id as pad_value, so CSLRTrainingModule's label_lengths (labels
+            # != pad_value) silently drops them from the CTC target instead of
+            # forcing the model to predict a meaningless "<unk>" class.
+            unknown_id=config.model.vocab_size,
         )
     }
     _, dataloaders = load_datasets_and_dataloaders(
