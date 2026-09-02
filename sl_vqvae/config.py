@@ -165,6 +165,27 @@ class BERTTrainConfig(StrictModel):
         return cls.model_validate_json(Path(path).read_text())
 
 
+class CSLRDataConfig(DataConfig):
+    # Passed straight through to sldl.targets.ContinuousRecognitionTarget, which reads
+    # sample["annotations"][annotation_id][column] as each window's gloss sequence.
+    annotation_id: str = "both_hands"
+    column: str = "lemma"
+    # Path to a JSON file mapping gloss label -> class id (0 .. model.vocab_size - 1).
+    label_to_id: str
+
+
+class CSLRTrainConfig(StrictModel):
+    data: CSLRDataConfig
+    model: CSLRModelConfig = CSLRModelConfig()
+    optimizer: OptimizerConfig = OptimizerConfig()
+    trainer: TrainerConfig
+    seed: int | None = None
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "CSLRTrainConfig":
+        return cls.model_validate_json(Path(path).read_text())
+
+
 class TestingConfig(StrictModel):
     checkpoint_path: str
     results_path: str | None = None
