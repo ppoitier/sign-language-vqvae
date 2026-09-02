@@ -1,0 +1,11 @@
+How are we going to do this ?
+
+Option 1 : 
+VQ-VAE Motion Tokens [B,T] (B = batch size, T = time step) --> Token Embedding --> 
+    Positional Encoding --> Random Masking --> 12-Layer Transformer Encoder --> 
+    Token Classification Head --> Masked Token Prediction Loss --> 
+    Contextual Motion Embeddings [B,T,D] (D = dimension)
+
+
+MaskGIT paper : https://arxiv.org/pdf/2202.04200
+MaskGIT explanation for dummies : https://youtu.be/dQw4w9WgXcQ?si=eKDSwsW_lDX5r0O5
