@@ -40,6 +40,7 @@ def train(config: CSLRTrainConfig) -> None:
     )
 
     model = build_model(config.model)
+    print(f"Vocab size: {model.vocab_size}, blank id: {model.blank_id}")
     if config.trainer.compile_model:
         model = torch.compile(model)
 

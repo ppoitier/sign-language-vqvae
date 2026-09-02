@@ -3,7 +3,8 @@
     "root": "E:/datasets/sign-language/lsfb-cont",
     "batch_size": 64,
     "num_workers": 0,
-    "annotated": true
+    "annotated": true,
+    "max_empty_windows": null
   },
   "model": {
     "type": "body_part_transformer",
@@ -12,7 +13,7 @@
   },
   "testing": {
     "checkpoint_path": "D:/data/lucia/vqvae/sign-language-vqvae/checkpoints/917394/best.ckpt",
-    "results_path": "D:/data/lucia/vqvae/sign-language-vqvae/checkpoints/917394/tokens.npy",
+    "results_path": "D:/data/lucia/vqvae/sign-language-vqvae/tokens.npy",
     "enable_progress_bar": true
   }
 }
