@@ -137,6 +137,9 @@ class TrainerConfig(StrictModel):
     compile_model: bool = True
     gradient_clip_val: float | None = 1.0
     overfit_batches: float = 0.0
+    # Epochs with no improvement on the early-stopping monitor before training
+    # stops early. `None` disables early stopping.
+    early_stopping_patience: int | None = 20
 
 
 class TrainConfig(StrictModel):

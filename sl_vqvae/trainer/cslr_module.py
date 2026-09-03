@@ -114,8 +114,9 @@ class CSLRTrainingModule(L.LightningModule):
         later as a bare `illegal memory access` at the first host-device sync
         (F.ctc_loss), with a traceback that points at the sync rather than the
         real cause. Failing here instead turns that into an actionable error.
-        Note `zero_infinity=True` does NOT protect against target_length >
-        input_length on CUDA -- the bad read happens before the clamp.
+        Note `zero_infinity=True` does NOT protect against an infeasible
+        (label_length + adjacent_duplicates) > input_length on CUDA -- the bad
+        read happens before the clamp.
         """
         labels = labels.cpu()
         input_lengths = input_lengths.cpu()
@@ -136,13 +137,24 @@ class CSLRTrainingModule(L.LightningModule):
                 f"first offending batch indices: {empty[:10].tolist()}."
             )
 
-        infeasible = (label_lengths > input_lengths).nonzero(as_tuple=True)[0]
+        # CTC needs a blank between two adjacent-identical target labels (otherwise
+        # collapsing repeats would merge them into one), so the real minimum feasible
+        # input length is label_length + adjacent-duplicate count, not just label_length.
+        positions = torch.arange(labels.size(1) - 1)
+        valid_pair = (positions + 1).unsqueeze(0) < label_lengths.unsqueeze(1)
+        adjacent_dupes = ((labels[:, :-1] == labels[:, 1:]) & valid_pair).sum(dim=1)
+        required_lengths = label_lengths + adjacent_dupes
+
+        infeasible = (required_lengths > input_lengths).nonzero(as_tuple=True)[0]
         if infeasible.numel():
-            pairs = [(i.item(), label_lengths[i].item(), input_lengths[i].item()) for i in infeasible[:10]]
+            pairs = [
+                (i.item(), label_lengths[i].item(), adjacent_dupes[i].item(), input_lengths[i].item())
+                for i in infeasible[:10]
+            ]
             raise RuntimeError(
-                f"{infeasible.numel()} sample(s) have target_length > input_length, which the CUDA "
-                f"CTC kernel cannot handle even with zero_infinity=True. "
-                f"(batch_idx, label_length, input_length): {pairs}."
+                f"{infeasible.numel()} sample(s) have label_length + adjacent_duplicates > input_length, "
+                f"which the CUDA CTC kernel cannot handle even with zero_infinity=True. "
+                f"(batch_idx, label_length, adjacent_duplicates, input_length): {pairs}."
             )
 
     def forward_step(self, batch: dict, stage: str) -> Tensor:
