@@ -2,7 +2,7 @@ import argparse
 
 import lightning as L
 import torch
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from sldl.targets import ContinuousRecognitionTarget
 
@@ -34,6 +34,12 @@ def train(config: CSLRTrainConfig) -> None:
             # != pad_value) silently drops them from the CTC target instead of
             # forcing the model to predict a meaningless "<unk>" class.
             unknown_id=config.model.vocab_size,
+            # ~34% of windows had adjacent-duplicate glosses, each raising the
+            # window's CTC-feasible minimum input length by 1 (a blank is needed
+            # to keep two adjacent-identical labels distinguishable after greedy
+            # decoding's repeat-collapse). Collapsing them here keeps the CTC
+            # target format valid for every window.
+            collapse_adjacent_duplicates=True,
         )
     }
     _, dataloaders = load_datasets_and_dataloaders(
@@ -64,13 +70,22 @@ def train(config: CSLRTrainConfig) -> None:
         save_last=True,
         filename="best",
     )
+    callbacks = [checkpoint_callback]
+    if config.trainer.early_stopping_patience is not None:
+        callbacks.append(
+            EarlyStopping(
+                monitor="validation/wer",
+                mode="min",
+                patience=config.trainer.early_stopping_patience,
+            )
+        )
 
     trainer = L.Trainer(
         max_epochs=config.trainer.max_epochs,
         log_every_n_steps=config.trainer.log_every_n_steps,
         fast_dev_run=config.trainer.fast_dev_run,
         logger=logger,
-        callbacks=[checkpoint_callback],
+        callbacks=callbacks,
         enable_progress_bar=config.trainer.enable_progress_bar,
         gradient_clip_val=config.trainer.gradient_clip_val,
         overfit_batches=config.trainer.overfit_batches,
